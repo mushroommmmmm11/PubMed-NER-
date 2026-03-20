@@ -2,37 +2,44 @@
 # -*- coding: utf-8 -*-
 
 """
-抓取网页 + 文本清洗
-用法示例：
-    python fetch_and_clean.py --input urls.txt --output-dir data
+批量抓取网页 + 文本清洗。
 
-urls.txt 每行一个 URL
+示例：
+    python fetch_and_clean.py --input urls.txt --output-dir data
+    python fetch_and_clean.py --input urls.txt --output-dir data --retries 3 --export-markdown --export-jsonl
+    python fetch_and_clean.py --resume-failures-from data/summary.json --output-dir rerun_data
+
+特性：
+- robots.txt 礼貌检查
+- 请求失败自动重试 + 退避等待
+- 运行日志输出到终端和文件
+- 失败任务重跑
+- 导出 clean_text、Markdown、JSONL、metadata、summary
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import importlib.util
 import json
+import logging
 import os
 import re
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.robotparser import RobotFileParser
 
-try:
-    import requests  # type: ignore
-except ImportError:
-    requests = None
-
-try:
-    from bs4 import BeautifulSoup  # type: ignore
-except ImportError:
-    BeautifulSoup = None
+requests_spec = importlib.util.find_spec("requests")
+requests = importlib.import_module("requests") if requests_spec else None
+bs4_spec = importlib.util.find_spec("bs4")
+BeautifulSoup = getattr(importlib.import_module("bs4"), "BeautifulSoup") if bs4_spec else None
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -41,6 +48,8 @@ DEFAULT_HEADERS = {
         "Chrome/122.0 Safari/537.36"
     )
 }
+DEFAULT_LOG_FILE = "fetch.log"
+DEFAULT_SUMMARY_FILE = "summary.json"
 
 
 @dataclass
@@ -52,6 +61,8 @@ class PageResult:
     raw_html_path: Optional[str]
     clean_text_path: Optional[str]
     metadata_path: Optional[str]
+    markdown_path: Optional[str] = None
+    attempts: int = 0
     error: Optional[str] = None
 
 
@@ -75,7 +86,10 @@ class FallbackHTMLExtractor(HTMLParser):
     def handle_starttag(self, tag: str, attrs) -> None:
         attrs_dict = dict(attrs)
         classes = attrs_dict.get("class", "")
-        skip_tags = {"script", "style", "noscript", "svg", "canvas", "header", "footer", "nav", "aside", "form", "button"}
+        skip_tags = {
+            "script", "style", "noscript", "svg", "canvas", "header",
+            "footer", "nav", "aside", "form", "button",
+        }
         if tag in skip_tags:
             self.skip_stack.append(tag)
             return
@@ -94,8 +108,9 @@ class FallbackHTMLExtractor(HTMLParser):
         if tag in {"td", "th"}:
             self.current_parts.append(" | ")
         noise_classes = [
-            "advertisement", "ads", "promo", "newsletter", "social", "related-posts",
-            "breadcrumb", "breadcrumbs", "cookie", "banner", "sidebar", "comments",
+            "advertisement", "ads", "promo", "newsletter", "social",
+            "related-posts", "breadcrumb", "breadcrumbs", "cookie",
+            "banner", "sidebar", "comments",
         ]
         if any(noise in classes for noise in noise_classes):
             self.skip_stack.append(tag)
@@ -152,6 +167,25 @@ def read_urls(input_file: str) -> List[str]:
     return urls
 
 
+def load_failed_urls(summary_file: str) -> List[str]:
+    with open(summary_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    results = payload.get("results", [])
+    urls = [item["url"] for item in results if item.get("status") in {"error", "skipped"}]
+    return dedupe_keep_order(urls)
+
+
+def dedupe_keep_order(items: Sequence[str]) -> List[str]:
+    seen = set()
+    output: List[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        output.append(item)
+    return output
+
+
 def robots_allowed(url: str, user_agent: str = "*") -> bool:
     parsed = urlparse(url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
@@ -168,11 +202,7 @@ def fetch_html(url: str, timeout: int = 20) -> SimpleResponse:
     if requests is not None:
         resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
         resp.raise_for_status()
-        return SimpleResponse(
-            text=resp.text,
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-        )
+        return SimpleResponse(resp.text, resp.status_code, dict(resp.headers))
 
     req = Request(url, headers=DEFAULT_HEADERS)
     with urlopen(req, timeout=timeout) as resp:
@@ -182,6 +212,39 @@ def fetch_html(url: str, timeout: int = 20) -> SimpleResponse:
             status_code=getattr(resp, "status", 200),
             headers=dict(resp.headers.items()),
         )
+
+
+def fetch_with_retry(
+    url: str,
+    timeout: int,
+    retries: int,
+    retry_backoff: float,
+    logger: logging.Logger,
+) -> tuple[SimpleResponse, int]:
+    last_error: Optional[Exception] = None
+    max_attempts = max(1, retries + 1)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = fetch_html(url, timeout=timeout)
+            return response, attempt
+        except Exception as exc:
+            last_error = exc
+            if attempt >= max_attempts:
+                break
+            sleep_sec = retry_backoff * attempt
+            logger.warning(
+                "Fetch failed for %s on attempt %s/%s: %s. Retrying in %.1fs",
+                url,
+                attempt,
+                max_attempts,
+                exc,
+                sleep_sec,
+            )
+            time.sleep(sleep_sec)
+
+    assert last_error is not None
+    raise last_error
 
 
 def extract_main_content(soup):
@@ -217,11 +280,12 @@ def clean_text_from_html(html: str, url: str) -> Dict[str, Any]:
     if BeautifulSoup is None:
         parser = FallbackHTMLExtractor()
         parser.feed(html)
-        text = post_clean_text("\n".join(parser.blocks))
+        clean_text = post_clean_text("\n".join(parser.blocks))
         return {
             "url": url,
             "title": normalize_whitespace(parser.title),
-            "clean_text": text,
+            "clean_text": clean_text,
+            "markdown_text": build_markdown_document(normalize_whitespace(parser.title), url, clean_text),
         }
 
     soup = BeautifulSoup(html, "html.parser")
@@ -253,8 +317,18 @@ def clean_text_from_html(html: str, url: str) -> Dict[str, Any]:
             if table_text:
                 blocks.append(table_text)
 
-    text = post_clean_text("\n".join(blocks))
-    return {"url": url, "title": title, "clean_text": text}
+    clean_text = post_clean_text("\n".join(blocks))
+    return {
+        "url": url,
+        "title": title,
+        "clean_text": clean_text,
+        "markdown_text": build_markdown_document(title, url, clean_text),
+    }
+
+
+def build_markdown_document(title: str, url: str, clean_text: str) -> str:
+    lines = [f"# {title or 'Untitled'}", "", f"Source: {url}", "", clean_text.strip()]
+    return "\n".join(lines).strip() + "\n"
 
 
 def extract_table_text(table_tag) -> str:
@@ -326,32 +400,72 @@ def save_json(path: str, obj: Dict[str, Any]) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-def process_url(url: str, output_dir: str, delay_sec: float = 2.0, check_robots: bool = True) -> PageResult:
-    from datetime import datetime, timezone
+def append_jsonl(path: str, obj: Dict[str, Any]) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-    fetched_at = datetime.now(timezone.utc).isoformat()
-    raw_dir = os.path.join(output_dir, "raw_html")
-    clean_dir = os.path.join(output_dir, "clean_text")
-    meta_dir = os.path.join(output_dir, "metadata")
-    ensure_dir(raw_dir)
-    ensure_dir(clean_dir)
-    ensure_dir(meta_dir)
 
+def build_paths(output_dir: str, url: str) -> Dict[str, str]:
     base = safe_filename(url)
-    raw_html_path = os.path.join(raw_dir, base + ".html")
-    clean_text_path = os.path.join(clean_dir, base + ".txt")
-    metadata_path = os.path.join(meta_dir, base + ".json")
+    return {
+        "raw_html": os.path.join(output_dir, "raw_html", base + ".html"),
+        "clean_text": os.path.join(output_dir, "clean_text", base + ".txt"),
+        "metadata": os.path.join(output_dir, "metadata", base + ".json"),
+        "markdown": os.path.join(output_dir, "markdown", base + ".md"),
+    }
+
+
+def process_url(
+    url: str,
+    output_dir: str,
+    delay_sec: float,
+    check_robots: bool,
+    timeout: int,
+    retries: int,
+    retry_backoff: float,
+    skip_existing: bool,
+    export_markdown: bool,
+    jsonl_path: Optional[str],
+    logger: logging.Logger,
+) -> PageResult:
+    fetched_at = datetime.now(timezone.utc).isoformat()
+
+    for subdir in ["raw_html", "clean_text", "metadata", "markdown"]:
+        ensure_dir(os.path.join(output_dir, subdir))
+
+    paths = build_paths(output_dir, url)
+
+    if skip_existing and os.path.exists(paths["metadata"]):
+        logger.info("Skipping %s because metadata already exists", url)
+        return PageResult(
+            url=url,
+            status="skipped_existing",
+            title="",
+            fetched_at=fetched_at,
+            raw_html_path=paths["raw_html"] if os.path.exists(paths["raw_html"]) else None,
+            clean_text_path=paths["clean_text"] if os.path.exists(paths["clean_text"]) else None,
+            metadata_path=paths["metadata"],
+            markdown_path=paths["markdown"] if os.path.exists(paths["markdown"]) else None,
+            attempts=0,
+            error=None,
+        )
 
     try:
         if check_robots and not robots_allowed(url, user_agent="*"):
-            return PageResult(url, "skipped", "", fetched_at, None, None, None, "Blocked by robots.txt")
+            logger.warning("Blocked by robots.txt: %s", url)
+            return PageResult(url, "skipped", "", fetched_at, None, None, None, None, 0, "Blocked by robots.txt")
 
-        resp = fetch_html(url)
+        resp, attempts = fetch_with_retry(url, timeout, retries, retry_backoff, logger)
         html = resp.text
-        save_text(raw_html_path, html)
+        save_text(paths["raw_html"], html)
 
         parsed = clean_text_from_html(html, url)
-        save_text(clean_text_path, parsed["clean_text"])
+        save_text(paths["clean_text"], parsed["clean_text"])
+
+        markdown_path: Optional[str] = None
+        if export_markdown:
+            save_text(paths["markdown"], parsed["markdown_text"])
+            markdown_path = paths["markdown"]
 
         metadata = {
             "url": url,
@@ -359,54 +473,156 @@ def process_url(url: str, output_dir: str, delay_sec: float = 2.0, check_robots:
             "status_code": resp.status_code,
             "content_type": resp.headers.get("Content-Type", ""),
             "fetched_at": fetched_at,
-            "raw_html_path": raw_html_path,
-            "clean_text_path": clean_text_path,
+            "attempts": attempts,
+            "raw_html_path": paths["raw_html"],
+            "clean_text_path": paths["clean_text"],
+            "markdown_path": markdown_path,
             "content_length": len(html),
         }
-        save_json(metadata_path, metadata)
-        time.sleep(delay_sec)
-        return PageResult(url, "ok", parsed["title"], fetched_at, raw_html_path, clean_text_path, metadata_path)
-    except Exception as e:
-        return PageResult(url, "error", "", fetched_at, None, None, None, str(e))
+        save_json(paths["metadata"], metadata)
+
+        if jsonl_path:
+            append_jsonl(
+                jsonl_path,
+                {
+                    "url": url,
+                    "title": parsed["title"],
+                    "fetched_at": fetched_at,
+                    "attempts": attempts,
+                    "clean_text": parsed["clean_text"],
+                    "markdown_path": markdown_path,
+                },
+            )
+
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+
+        return PageResult(
+            url=url,
+            status="ok",
+            title=parsed["title"],
+            fetched_at=fetched_at,
+            raw_html_path=paths["raw_html"],
+            clean_text_path=paths["clean_text"],
+            metadata_path=paths["metadata"],
+            markdown_path=markdown_path,
+            attempts=attempts,
+            error=None,
+        )
+    except Exception as exc:
+        logger.error("Failed to process %s: %s", url, exc)
+        return PageResult(url, "error", "", fetched_at, None, None, None, None, retries + 1, str(exc))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="抓取网页并清洗文本")
-    parser.add_argument("--input", required=True, help="URL 列表文件，每行一个 URL")
-    parser.add_argument("--output-dir", default="data", help="输出目录")
-    parser.add_argument("--delay-sec", type=float, default=2.0, help="请求间隔秒数")
-    parser.add_argument("--no-robots-check", action="store_true", help="不检查 robots.txt（不推荐）")
-    args = parser.parse_args()
+def setup_logger(output_dir: str, log_file: str, verbose: bool) -> logging.Logger:
+    ensure_dir(output_dir)
+    logger = logging.getLogger("fetch_and_clean")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    logger.propagate = False
 
-    ensure_dir(args.output_dir)
-    urls = read_urls(args.input)
-    results: List[PageResult] = []
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
-    print(f"[INFO] Loaded {len(urls)} URLs")
-    if requests is None:
-        print("[INFO] requests 未安装，已切换到 urllib 标准库抓取")
-    if BeautifulSoup is None:
-        print("[INFO] bs4 未安装，已切换到内置 HTMLParser 清洗")
+    file_handler = logging.FileHandler(os.path.join(output_dir, log_file), encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
-    for idx, url in enumerate(urls, start=1):
-        print(f"[INFO] ({idx}/{len(urls)}) Processing: {url}")
-        result = process_url(url, args.output_dir, args.delay_sec, not args.no_robots_check)
-        results.append(result)
-        if result.status == "ok":
-            print(f"[OK] {result.title}")
-        else:
-            print(f"[WARN] {result.status}: {result.error}")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    return logger
 
+
+def write_summary(output_dir: str, results: List[PageResult], source_mode: str) -> str:
     summary = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_mode": source_mode,
         "total": len(results),
         "ok": sum(1 for r in results if r.status == "ok"),
         "skipped": sum(1 for r in results if r.status == "skipped"),
+        "skipped_existing": sum(1 for r in results if r.status == "skipped_existing"),
         "error": sum(1 for r in results if r.status == "error"),
         "results": [asdict(r) for r in results],
     }
-    summary_path = os.path.join(args.output_dir, "summary.json")
+    summary_path = os.path.join(output_dir, DEFAULT_SUMMARY_FILE)
     save_json(summary_path, summary)
-    print(f"[DONE] Summary saved to: {summary_path}")
+    return summary_path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="批量抓取网页并清洗文本")
+    parser.add_argument("--input", help="URL 列表文件，每行一个 URL")
+    parser.add_argument("--output-dir", default="data", help="输出目录")
+    parser.add_argument("--delay-sec", type=float, default=2.0, help="请求间隔秒数")
+    parser.add_argument("--timeout", type=int, default=20, help="单次请求超时秒数")
+    parser.add_argument("--retries", type=int, default=2, help="失败后的重试次数")
+    parser.add_argument("--retry-backoff", type=float, default=2.0, help="重试退避基数秒数")
+    parser.add_argument("--log-file", default=DEFAULT_LOG_FILE, help="日志文件名，写入 output-dir 下")
+    parser.add_argument("--resume-failures-from", help="从既有 summary.json 中读取 error/skipped URL 重新跑")
+    parser.add_argument("--skip-existing", action="store_true", help="如果 metadata 已存在，则跳过该 URL")
+    parser.add_argument("--export-markdown", action="store_true", help="额外导出 Markdown 版本")
+    parser.add_argument("--export-jsonl", action="store_true", help="额外导出聚合 JSONL 文件")
+    parser.add_argument("--no-robots-check", action="store_true", help="不检查 robots.txt（不推荐）")
+    parser.add_argument("--verbose", action="store_true", help="终端打印更详细日志")
+    args = parser.parse_args()
+
+    if not args.input and not args.resume_failures_from:
+        parser.error("必须提供 --input 或 --resume-failures-from 其中之一")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+    ensure_dir(args.output_dir)
+    logger = setup_logger(args.output_dir, args.log_file, args.verbose)
+
+    if args.resume_failures_from:
+        urls = load_failed_urls(args.resume_failures_from)
+        source_mode = f"resume_failures_from:{args.resume_failures_from}"
+    else:
+        urls = read_urls(args.input)
+        source_mode = f"input:{args.input}"
+
+    urls = dedupe_keep_order(urls)
+    jsonl_path = os.path.join(args.output_dir, "records.jsonl") if args.export_jsonl else None
+    if jsonl_path:
+        if os.path.exists(jsonl_path):
+            os.remove(jsonl_path)
+        save_text(jsonl_path, "")
+
+    logger.info("Loaded %s URLs", len(urls))
+    logger.info("Source mode: %s", source_mode)
+    logger.info("Retries=%s timeout=%ss delay=%.1fs", args.retries, args.timeout, args.delay_sec)
+    if requests is None:
+        logger.info("requests 未安装，已切换到 urllib 标准库抓取")
+    if BeautifulSoup is None:
+        logger.info("bs4 未安装，已切换到内置 HTMLParser 清洗")
+
+    results: List[PageResult] = []
+    for idx, url in enumerate(urls, start=1):
+        logger.info("(%s/%s) Processing: %s", idx, len(urls), url)
+        result = process_url(
+            url=url,
+            output_dir=args.output_dir,
+            delay_sec=args.delay_sec,
+            check_robots=not args.no_robots_check,
+            timeout=args.timeout,
+            retries=args.retries,
+            retry_backoff=args.retry_backoff,
+            skip_existing=args.skip_existing,
+            export_markdown=args.export_markdown,
+            jsonl_path=jsonl_path,
+            logger=logger,
+        )
+        results.append(result)
+        logger.info("Result status=%s attempts=%s url=%s", result.status, result.attempts, url)
+
+    summary_path = write_summary(args.output_dir, results, source_mode)
+    logger.info("Summary saved to: %s", summary_path)
+    if jsonl_path:
+        logger.info("JSONL saved to: %s", jsonl_path)
 
 
 if __name__ == "__main__":
