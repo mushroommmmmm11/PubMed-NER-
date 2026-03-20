@@ -1,0 +1,71 @@
+{
+  "generated_at": "2026-03-20T03:47:26.671839+00:00",
+  "source_mode": "input:urls.txt",
+  "total": 5,
+  "ok": 0,
+  "skipped": 0,
+  "skipped_existing": 0,
+  "error": 5,
+  "results": [
+    {
+      "url": "https://www.testing.com/tests/complete-blood-count-cbc/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:47:21.261583+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "markdown_path": null,
+      "attempts": 2,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/c-reactive-protein-crp/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:47:22.467529+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "markdown_path": null,
+      "attempts": 2,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/procalcitonin-pct/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:47:23.523736+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "markdown_path": null,
+      "attempts": 2,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/erythrocyte-sedimentation-rate-esr/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:47:24.575883+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "markdown_path": null,
+      "attempts": 2,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/prothrombin-time-and-international-normalized-ratio-pt-inr/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:47:25.616205+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "markdown_path": null,
+      "attempts": 2,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    }
+  ]
+}
