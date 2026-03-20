@@ -1,0 +1,5 @@
+https://www.testing.com/tests/complete-blood-count-cbc/
+https://www.testing.com/tests/c-reactive-protein-crp/
+https://www.testing.com/tests/procalcitonin-pct/
+https://www.testing.com/tests/erythrocyte-sedimentation-rate-esr/
+https://www.testing.com/tests/prothrombin-time-and-international-normalized-ratio-pt-inr/

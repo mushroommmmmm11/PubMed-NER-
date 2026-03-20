@@ -1,0 +1,58 @@
+{
+  "total": 5,
+  "ok": 0,
+  "skipped": 0,
+  "error": 5,
+  "results": [
+    {
+      "url": "https://www.testing.com/tests/complete-blood-count-cbc/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:31:09.368347+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/c-reactive-protein-crp/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:31:09.394369+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/procalcitonin-pct/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:31:09.404736+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/erythrocyte-sedimentation-rate-esr/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:31:09.415472+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    },
+    {
+      "url": "https://www.testing.com/tests/prothrombin-time-and-international-normalized-ratio-pt-inr/",
+      "status": "error",
+      "title": "",
+      "fetched_at": "2026-03-20T03:31:09.424891+00:00",
+      "raw_html_path": null,
+      "clean_text_path": null,
+      "metadata_path": null,
+      "error": "<urlopen error Tunnel connection failed: 403 Forbidden>"
+    }
+  ]
+}
